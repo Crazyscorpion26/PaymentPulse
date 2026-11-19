@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: PaymentPulse
+    orgId: 1
+    folder: PaymentPulse
+    type: file
+    disableDeletion: true
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

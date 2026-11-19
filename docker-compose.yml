@@ -1,0 +1,54 @@
+services:
+  paymentpulse:
+    build: ./app
+    container_name: paymentpulse-api
+    ports: ["8000:8000"]
+    environment: ["LOG_LEVEL=INFO"]
+    networks: [observability]
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: paymentpulse-prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks: [observability]
+    depends_on: [paymentpulse]
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: paymentpulse-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    ports: ["3100:3100"]
+    networks: [observability]
+  promtail:
+    image: grafana/promtail:3.3.2
+    container_name: paymentpulse-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitoring/promtail/config.yml:/etc/promtail/config.yml:ro
+    networks: [observability]
+    depends_on: [loki]
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: paymentpulse-grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: change-me-local-only
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [observability]
+    depends_on: [prometheus, loki]
+networks:
+  observability:
+volumes:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,24 @@
+groups:
+  - name: paymentpulse-sre
+    rules:
+      - alert: PaymentPulseApiDown
+        expr: up{job="paymentpulse"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: PaymentPulse API scrape target is down
+          description: Prometheus has not been able to scrape the API for more than one minute.
+      - alert: HighApiErrorRate
+        expr: sum(rate(paymentpulse_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(paymentpulse_http_requests_total[5m])), 0.001) > 0.05
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: API 5xx error ratio is above 5 percent
+          description: Investigate application logs and recent changes.
+      - alert: HighApiLatencyP95
+        expr: histogram_quantile(0.95, sum by (le) (rate(paymentpulse_request_duration_seconds_bucket[5m]))) > 1
+        for: 3m
+        labels: {severity: warning}
+        annotations:
+          summary: API p95 latency exceeds one second
+          description: Check slow requests, dependency health and resource saturation.

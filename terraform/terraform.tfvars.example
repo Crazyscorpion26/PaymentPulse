@@ -1,0 +1,6 @@
+aws_region = "ap-south-1"
+project_name = "paymentpulse"
+container_image = "ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/paymentpulse:latest"
+vpc_id = "vpc-xxxxxxxx"
+public_subnet_ids = ["subnet-aaaaaaaa", "subnet-bbbbbbbb"]
+allowed_ingress_cidr = "YOUR_PUBLIC_IP/32"

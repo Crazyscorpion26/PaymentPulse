@@ -1,0 +1,11 @@
+{
+  "title": "PaymentPulse - SRE Overview", "uid": "paymentpulse-sre", "schemaVersion": 39, "version": 1,
+  "refresh": "10s", "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {"id":1,"type":"stat","title":"API availability (scrape up)","gridPos":{"h":5,"w":6,"x":0,"y":0},"datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"up{job=\"paymentpulse\"}","refId":"A"}]},
+    {"id":2,"type":"stat","title":"Transactions / sec","gridPos":{"h":5,"w":6,"x":6,"y":0},"datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"sum(rate(paymentpulse_transactions_total[5m]))","refId":"A"}]},
+    {"id":3,"type":"timeseries","title":"HTTP request rate","gridPos":{"h":8,"w":12,"x":12,"y":0},"datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"sum by (status) (rate(paymentpulse_http_requests_total[5m]))","legendFormat":"{{status}}","refId":"A"}]},
+    {"id":4,"type":"timeseries","title":"API p95 latency","gridPos":{"h":8,"w":12,"x":0,"y":5},"datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"histogram_quantile(0.95, sum by (le) (rate(paymentpulse_request_duration_seconds_bucket[5m])))","legendFormat":"p95","refId":"A"}]},
+    {"id":5,"type":"logs","title":"Application logs","gridPos":{"h":10,"w":12,"x":12,"y":8},"datasource":{"type":"loki","uid":"loki"},"targets":[{"expr":"{container=\"paymentpulse-api\"}","refId":"A"}]}
+  ]
+}
