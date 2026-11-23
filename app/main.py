@@ -57,7 +57,7 @@ async def startup():
         logger.warning("DATABASE_URL not set – using in-memory storage")
 
 
-@app.onEvent("shutdown")
+@app.on_event("shutdown")
 async def shutdown():
     if _pool:
         await _pool.close()
