@@ -1,7 +1,7 @@
-import json
+  import asyncio
+  import json
   import logging
   import os
-  import random
   import time
   import uuid
   from datetime import datetime, timezone
@@ -23,14 +23,15 @@ import json
   buckets=(.01,.025,.05,.1,.25,.5,1,2.5,5))
   IN_FLIGHT = Gauge("paymentpulse_in_flight_requests", "Requests currently being processed")
 
-  app = FastAPI(title="PaymentPulse API", version="1.0.0", description="Synthetic payment lifecycle service for SRE portfolio
-  practice")
+  app = FastAPI(title="PaymentPulse API", version="1.0.0", description="Synthetic payment lifecycle service for SRE portfolio practice")
 
-  # ── Database ──────────────────────────────────────────────────────
+  # ── Database / Storage ─────────────────────────────────────────────
   DATABASE_URL = os.getenv("DATABASE_URL", "")
+  _pool: Optional[asyncpg.Pool] = None
+  _transactions: dict[str, dict] = {}  # in-memory fallback (CI / local dev)
+
 
   async def init_db(pool: asyncpg.Pool):
-      """Create the transactions table if it doesn't exist."""
       await pool.execute("""
           CREATE TABLE IF NOT EXISTS transactions (
               transaction_id TEXT PRIMARY KEY,
@@ -44,6 +45,7 @@ import json
       """)
       logger.info("Database table 'transactions' is ready")
 
+
   @app.on_event("startup")
   async def startup():
       global _pool
@@ -52,15 +54,14 @@ import json
           await init_db(_pool)
           logger.info("Connected to PostgreSQL")
       else:
-          _pool = None
-          logger.warning("DATABASE_URL not set – running without persistent storage")
+          logger.warning("DATABASE_URL not set – using in-memory storage")
+
 
   @app.on_event("shutdown")
   async def shutdown():
       if _pool:
           await _pool.close()
 
-  _pool: Optional[asyncpg.Pool] = None
 
   class PaymentRequest(BaseModel):
       amount: float = Field(gt=0, le=1000000)
@@ -70,7 +71,9 @@ import json
 
 
   def emit(event: str, **fields):
-      logger.info(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "service": SERVICE, "event": event, **fields}))
+      logger.info(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "service": SERVICE, "event":
+  event, **fields}))
+
 
   @app.middleware("http")
   async def observe_requests(request, call_next):
@@ -89,9 +92,11 @@ import json
           REQUESTS.labels(request.method, endpoint, status).inc()
           IN_FLIGHT.dec()
 
+
   @app.get("/health")
   def health():
       return {"status": "healthy", "service": SERVICE, "timestamp": datetime.now(timezone.utc).isoformat()}
+
 
   @app.get("/ready")
   async def ready():
@@ -102,15 +107,10 @@ import json
               return {"status": "ready", "db": "connected", "transactions": count}
           except Exception as e:
               return {"status": "degraded", "error": str(e)}
-      return {"status": "ready", "db": "no_db_configured", "in_memory_transactions": 0}
+      return {"status": "ready", "db": "in_memory", "transactions": len(_transactions)}
 
-  @app.post("/payments", status_code=201)
-  async def create_payment(payload: PaymentRequest):
-      transaction_id = f"PP-{uuid.uuid4().hex[:12].upper()}"
-      scenario = payload.simulate
-      if scenario == "slow":
-          time.sleep(1.5)
-      status = "DECLINED" if scenario == "decline" else "PROCESSING"
+
+  def _make_record(transaction_id: str, payload: PaymentRequest, status: str, scenario: Optional[str]) -> dict:
       now_iso = datetime.now(timezone.utc).isoformat()
       events = [
           {"code": "R1", "status": "RECEIVED", "at": now_iso},
@@ -122,17 +122,6 @@ import json
           emit("remittance_callback_failed", transaction_id=transaction_id, severity="error")
       else:
           events.append({"code": "REMIT_CALLBACK", "status": "ACKNOWLEDGED", "at": now_iso})
-
-      if _pool:
-          async with _pool.acquire() as conn:
-              await conn.execute(
-                  """INSERT INTO transactions (transaction_id, amount, currency, destination, status, events)
-                     VALUES ($1, $2, $3, $4, $5, $6)""",
-                  transaction_id, payload.amount, payload.currency.upper(), payload.destination.upper(), status, json.dumps(events)
-              )
-      PAYMENTS.labels(status).inc()
-      emit("payment_created", transaction_id=transaction_id, status=status, amount=payload.amount, currency=payload.currency.upper(),
-  scenario=scenario or "normal")
       return {
           "transaction_id": transaction_id,
           "amount": payload.amount,
@@ -142,6 +131,33 @@ import json
           "events": events,
       }
 
+
+  @app.post("/payments", status_code=201)
+  async def create_payment(payload: PaymentRequest):
+      transaction_id = f"PP-{uuid.uuid4().hex[:12].upper()}"
+      scenario = payload.simulate
+      if scenario == "slow":
+          await asyncio.sleep(1.5)
+      status = "DECLINED" if scenario == "decline" else "PROCESSING"
+      record = _make_record(transaction_id, payload, status, scenario)
+
+      if _pool:
+          async with _pool.acquire() as conn:
+              await conn.execute(
+                  """INSERT INTO transactions (transaction_id, amount, currency, destination, status, events)
+                     VALUES ($1, $2, $3, $4, $5, $6)""",
+                  transaction_id, payload.amount, payload.currency.upper(), payload.destination.upper(), status,
+  json.dumps(events)
+              )
+      else:
+          _transactions[transaction_id] = record
+
+      PAYMENTS.labels(status).inc()
+      emit("payment_created", transaction_id=transaction_id, status=status, amount=payload.amount,
+  currency=payload.currency.upper(), scenario=scenario or "normal")
+      return record
+
+
   @app.get("/payments/{transaction_id}")
   async def get_payment(transaction_id: str):
       record = None
@@ -150,19 +166,25 @@ import json
               row = await conn.fetchrow("SELECT * FROM transactions WHERE transaction_id = $1", transaction_id)
               if row:
                   record = dict(row)
-                  record["events"] = json.loads(record["events"]) if isinstance(record["events"], str) else record["events"]
+                  record["events"] = json.loads(record["events"]) if isinstance(record["events"], str) else
+  record["events"]
+      else:
+          record = _transactions.get(transaction_id)
+
       if not record:
           emit("payment_not_found", transaction_id=transaction_id, severity="warning")
           raise HTTPException(status_code=404, detail="Transaction not found")
       emit("payment_lookup", transaction_id=transaction_id, status=record["status"])
       return record
 
+
   @app.get("/payments")
   async def search_payments(status: Optional[str] = None, limit: int = Query(default=50, ge=1, le=200)):
       if _pool:
           async with _pool.acquire() as conn:
               if status:
-                  rows = await conn.fetch("SELECT * FROM transactions WHERE status = $1 LIMIT $2", status.upper(), limit)
+                  rows = await conn.fetch("SELECT * FROM transactions WHERE status = $1 LIMIT $2", status.upper(),
+  limit)
               else:
                   rows = await conn.fetch("SELECT * FROM transactions LIMIT $1", limit)
           items = []
@@ -171,13 +193,19 @@ import json
               d["events"] = json.loads(d["events"]) if isinstance(d["events"], str) else d["events"]
               items.append(d)
           return {"count": len(items), "items": items}
-      return {"count": 0, "items": []}
+
+      results = list(_transactions.values())
+      if status:
+          results = [r for r in results if r["status"] == status.upper()]
+      return {"count": len(results[:limit]), "items": results[:limit]}
+
 
   @app.post("/simulate/outage")
-  def simulate_outage(seconds: int = Query(default=2, ge=1, le=10)):
+  async def simulate_outage(seconds: int = Query(default=2, ge=1, le=10)):
       emit("simulated_dependency_outage", severity="warning", duration_seconds=seconds)
-      time.sleep(seconds)
+      await asyncio.sleep(seconds)
       return {"message": "Synthetic dependency delay completed", "duration_seconds": seconds}
+
 
   @app.get("/metrics", response_class=PlainTextResponse)
   def metrics():
