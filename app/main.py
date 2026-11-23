@@ -1,4 +1,4 @@
-  import asyncio
+import asyncio
   import json
   import logging
   import os
@@ -6,8 +6,7 @@
   import uuid
   from datetime import datetime, timezone
   from typing import Optional
-
-  import asyncpg
+import asyncpg
   from fastapi import FastAPI, HTTPException, Query
   from fastapi.responses import PlainTextResponse
   from pydantic import BaseModel, Field
@@ -208,5 +207,5 @@
 
 
   @app.get("/metrics", response_class=PlainTextResponse)
-  def metrics():
-      return PlainTextResponse(generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST)
+def metrics():
+  return PlainTextResponse(generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST)
