@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -23,13 +24,13 @@ DURATION = Histogram("paymentpulse_request_duration_seconds", "Request duration"
                      buckets=(.01, .025, .05, .1, .25, .5, 1, 2.5, 5))
 IN_FLIGHT = Gauge("paymentpulse_in_flight_requests", "Requests currently being processed")
 
-app = FastAPI(title="PaymentPulse API", version="1.0.0", description="Synthetic payment lifecycle service for SRE portfolio practice")
-
 # ── Database / Storage ─────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 _pool: Optional[asyncpg.Pool] = None
 _transactions: dict[str, dict] = {}  # in-memory fallback (CI / local dev)
-
 
 async def init_db(pool: asyncpg.Pool):
     await pool.execute("""
@@ -45,23 +46,27 @@ async def init_db(pool: asyncpg.Pool):
     """)
     logger.info("Database table 'transactions' is ready")
 
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global _pool
+    # Startup
     if DATABASE_URL:
         _pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
         await init_db(_pool)
         logger.info("Connected to PostgreSQL")
     else:
         logger.warning("DATABASE_URL not set – using in-memory storage")
-
-
-@app.on_event("shutdown")
-async def shutdown():
+    yield
+    # Shutdown
     if _pool:
         await _pool.close()
 
+app = FastAPI(
+    title="PaymentPulse API",
+    version="1.0.0",
+    description="Synthetic payment lifecycle service for SRE portfolio practice",
+    lifespan=lifespan,
+)
 
 class PaymentRequest(BaseModel):
     amount: float = Field(gt=0, le=1000000)
@@ -69,10 +74,8 @@ class PaymentRequest(BaseModel):
     destination: str = Field(default="GB", min_length=2, max_length=2, pattern="^[A-Za-z]{2}$")
     simulate: Optional[str] = Field(default=None, description="Optional scenario: decline, slow, callback_failure")
 
-
 def emit(event: str, **fields):
     logger.info(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "service": SERVICE, "event": event, **fields}))
-
 
 @app.middleware("http")
 async def observe_requests(request, call_next):
@@ -91,11 +94,9 @@ async def observe_requests(request, call_next):
         REQUESTS.labels(request.method, endpoint, status).inc()
         IN_FLIGHT.dec()
 
-
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": SERVICE, "timestamp": datetime.now(timezone.utc).isoformat()}
-
 
 @app.get("/ready")
 async def ready():
@@ -107,7 +108,6 @@ async def ready():
         except Exception as e:
             return {"status": "degraded", "error": str(e)}
     return {"status": "ready", "db": "in_memory", "transactions": len(_transactions)}
-
 
 def _make_record(transaction_id: str, payload: PaymentRequest, status: str, scenario: Optional[str]) -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -130,7 +130,6 @@ def _make_record(transaction_id: str, payload: PaymentRequest, status: str, scen
         "events": events,
     }
 
-
 @app.post("/payments", status_code=201)
 async def create_payment(payload: PaymentRequest):
     transaction_id = f"PP-{uuid.uuid4().hex[:12].upper()}"
@@ -146,7 +145,7 @@ async def create_payment(payload: PaymentRequest):
                 """INSERT INTO transactions (transaction_id, amount, currency, destination, status, events)
                    VALUES ($1, $2, $3, $4, $5, $6)""",
                 transaction_id, payload.amount, payload.currency.upper(), payload.destination.upper(), status,
-                json.dumps(events)
+                json.dumps(record["events"])
             )
     else:
         _transactions[transaction_id] = record
@@ -155,7 +154,6 @@ async def create_payment(payload: PaymentRequest):
     emit("payment_created", transaction_id=transaction_id, status=status, amount=payload.amount,
          currency=payload.currency.upper(), scenario=scenario or "normal")
     return record
-
 
 @app.get("/payments/{transaction_id}")
 async def get_payment(transaction_id: str):
@@ -174,7 +172,6 @@ async def get_payment(transaction_id: str):
         raise HTTPException(status_code=404, detail="Transaction not found")
     emit("payment_lookup", transaction_id=transaction_id, status=record["status"])
     return record
-
 
 @app.get("/payments")
 async def search_payments(status: Optional[str] = None, limit: int = Query(default=50, ge=1, le=200)):
@@ -196,13 +193,11 @@ async def search_payments(status: Optional[str] = None, limit: int = Query(defau
         results = [r for r in results if r["status"] == status.upper()]
     return {"count": len(results[:limit]), "items": results[:limit]}
 
-
 @app.post("/simulate/outage")
 async def simulate_outage(seconds: int = Query(default=2, ge=1, le=10)):
     emit("simulated_dependency_outage", severity="warning", duration_seconds=seconds)
     await asyncio.sleep(seconds)
     return {"message": "Synthetic dependency delay completed", "duration_seconds": seconds}
-
 
 @app.get("/metrics", response_class=PlainTextResponse)
 def metrics():
